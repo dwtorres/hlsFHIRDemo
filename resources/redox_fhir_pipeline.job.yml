@@ -1,0 +1,126 @@
+# Redox FHIR Ingestion Pipeline
+#
+# This workflow ingests FHIR bundles from Redox via a mounted location
+# and processes them through Bronze and Silver layers.
+#
+# Trigger: File arrival in the mount path
+# Tables: Bronze (raw), Silver (per resource type)
+
+resources:
+  jobs:
+    redox_fhir_pipeline:
+      name: "Redox FHIR Ingestion Pipeline"
+      description: "Ingest and process Redox FHIR bundles into realtime analytics tables"
+
+      # File arrival trigger - monitors mount for new FHIR bundles
+      trigger:
+        pause_status: PAUSED  # Set to UNPAUSED in production
+        file_arrival:
+          url: ${var.mount_path}
+          min_time_between_triggers_seconds: 600
+          wait_after_last_change_seconds: 60
+
+      # Allow multiple concurrent runs for high-volume ingestion
+      max_concurrent_runs: 5
+
+      # Job parameters
+      parameters:
+        - name: catalog_use
+          default: ${var.catalog}
+        - name: schema_use
+          default: ${var.schema}
+        - name: mount_path
+          default: ${var.mount_path}
+        - name: full_refresh
+          default: "false"
+
+      # Queue for fair scheduling
+      queue:
+        enabled: true
+
+      # Email notifications on failure
+      email_notifications:
+        on_failure:
+          - ${var.notification_email}
+
+      tasks:
+        # Task 1: Conditional full refresh (drop tables)
+        - task_key: check_full_refresh
+          description: "Check if full refresh is requested"
+          notebook_task:
+            notebook_path: src/redox-fhir-pipeline/06 - Drop Tables.ipynb
+            base_parameters:
+              catalog_use: "{{job.parameters.catalog_use}}"
+              schema_use: "{{job.parameters.schema_use}}"
+          run_if: "{{job.parameters.full_refresh}} == 'true'"
+          warehouse_id: ${var.sql_warehouse_id}
+
+        # Task 2: Bronze ingestion (raw JSON + VARIANT)
+        - task_key: bronze_ingestion
+          description: "Ingest raw FHIR bundles into Bronze tables"
+          depends_on:
+            - task_key: check_full_refresh
+              outcome: ALL_DONE
+          notebook_task:
+            notebook_path: src/redox-fhir-pipeline/01 - Bronze Ingestion.ipynb
+            base_parameters:
+              catalog_use: "{{job.parameters.catalog_use}}"
+              schema_use: "{{job.parameters.schema_use}}"
+              mount_path: "{{job.parameters.mount_path}}"
+          warehouse_id: ${var.sql_warehouse_id}
+
+        # Task 3: Bundle metadata extraction
+        - task_key: bundle_meta
+          description: "Extract bundle-level metadata"
+          depends_on:
+            - task_key: bronze_ingestion
+          notebook_task:
+            notebook_path: src/redox-fhir-pipeline/02 - Bundle Meta.ipynb
+            base_parameters:
+              catalog_use: "{{job.parameters.catalog_use}}"
+              schema_use: "{{job.parameters.schema_use}}"
+          warehouse_id: ${var.sql_warehouse_id}
+
+        # Task 4: Explode resources and infer schemas
+        - task_key: resources_exploded
+          description: "Explode bundle entries and infer schemas"
+          depends_on:
+            - task_key: bronze_ingestion
+          notebook_task:
+            notebook_path: src/redox-fhir-pipeline/03 - Resources Exploded.ipynb
+            base_parameters:
+              catalog_use: "{{job.parameters.catalog_use}}"
+              schema_use: "{{job.parameters.schema_use}}"
+          warehouse_id: ${var.sql_warehouse_id}
+
+        # Task 5: Discover resource types (sets task values for for-each)
+        - task_key: discover_resources
+          description: "Discover available FHIR resource types"
+          depends_on:
+            - task_key: resources_exploded
+          notebook_task:
+            notebook_path: src/redox-fhir-pipeline/05 - Discover Resource Types.ipynb
+            base_parameters:
+              catalog_use: "{{job.parameters.catalog_use}}"
+              schema_use: "{{job.parameters.schema_use}}"
+          warehouse_id: ${var.sql_warehouse_id}
+
+        # Task 6: Create Silver tables (for-each resource type)
+        - task_key: silver_tables
+          description: "Create Silver tables for each resource type"
+          depends_on:
+            - task_key: discover_resources
+            - task_key: bundle_meta
+          for_each_task:
+            inputs: "{{tasks.discover_resources.values.resource_types}}"
+            concurrency: 20
+            task:
+              task_key: silver_resource
+              notebook_task:
+                notebook_path: src/redox-fhir-pipeline/04 - Silver Tables.ipynb
+                base_parameters:
+                  catalog_use: "{{job.parameters.catalog_use}}"
+                  schema_use: "{{job.parameters.schema_use}}"
+                  resource_type: "{{input}}"
+                  full_refresh: "{{job.parameters.full_refresh}}"
+              warehouse_id: ${var.sql_warehouse_id}
