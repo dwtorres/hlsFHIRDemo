@@ -1,10 +1,10 @@
 # Redox FHIR Ingestion Pipeline
 #
 # This workflow ingests FHIR bundles from Redox via a mounted location
-# and processes them through Bronze and Silver layers.
+# and processes them through Bronze, Silver, and Gold (OMOP CDM) layers.
 #
 # Trigger: File arrival in the mount path
-# Tables: Bronze (raw), Silver (per resource type)
+# Tables: Bronze (raw), Silver (per resource type), Gold (OMOP CDM v5.4)
 
 resources:
   jobs:
@@ -29,6 +29,8 @@ resources:
           default: ${var.catalog}
         - name: schema_use
           default: ${var.schema}
+        - name: gold_schema
+          default: ${var.gold_schema}
         - name: mount_path
           default: ${var.mount_path}
         - name: full_refresh
@@ -124,3 +126,111 @@ resources:
                   resource_type: "{{input}}"
                   full_refresh: "{{job.parameters.full_refresh}}"
               warehouse_id: ${var.sql_warehouse_id}
+
+        # =====================================================================
+        # GOLD LAYER: OMOP CDM v5.4 Tables
+        # =====================================================================
+
+        # Task 7: OMOP Person (from Patient)
+        - task_key: omop_person
+          description: "Transform Patient to OMOP Person"
+          depends_on:
+            - task_key: silver_tables
+          notebook_task:
+            notebook_path: src/redox-fhir-pipeline/gold/01 - Person.ipynb
+            base_parameters:
+              catalog_use: "{{job.parameters.catalog_use}}"
+              silver_schema: "{{job.parameters.schema_use}}"
+              gold_schema: "{{job.parameters.gold_schema}}"
+          warehouse_id: ${var.sql_warehouse_id}
+
+        # Task 8: OMOP Care Site (from Organization)
+        - task_key: omop_care_site
+          description: "Transform Organization to OMOP Care Site"
+          depends_on:
+            - task_key: silver_tables
+          notebook_task:
+            notebook_path: src/redox-fhir-pipeline/gold/08 - Provider and Care Site.ipynb
+            base_parameters:
+              catalog_use: "{{job.parameters.catalog_use}}"
+              silver_schema: "{{job.parameters.schema_use}}"
+              gold_schema: "{{job.parameters.gold_schema}}"
+          warehouse_id: ${var.sql_warehouse_id}
+
+        # Task 9: OMOP Visit Occurrence (from Encounter)
+        - task_key: omop_visit
+          description: "Transform Encounter to OMOP Visit Occurrence"
+          depends_on:
+            - task_key: omop_person
+          notebook_task:
+            notebook_path: src/redox-fhir-pipeline/gold/02 - Visit Occurrence.ipynb
+            base_parameters:
+              catalog_use: "{{job.parameters.catalog_use}}"
+              silver_schema: "{{job.parameters.schema_use}}"
+              gold_schema: "{{job.parameters.gold_schema}}"
+          warehouse_id: ${var.sql_warehouse_id}
+
+        # Task 10: OMOP Condition Occurrence (from Condition)
+        - task_key: omop_condition
+          description: "Transform Condition to OMOP Condition Occurrence"
+          depends_on:
+            - task_key: omop_visit
+          notebook_task:
+            notebook_path: src/redox-fhir-pipeline/gold/03 - Condition Occurrence.ipynb
+            base_parameters:
+              catalog_use: "{{job.parameters.catalog_use}}"
+              silver_schema: "{{job.parameters.schema_use}}"
+              gold_schema: "{{job.parameters.gold_schema}}"
+          warehouse_id: ${var.sql_warehouse_id}
+
+        # Task 11: OMOP Drug Exposure (from MedicationRequest)
+        - task_key: omop_drug
+          description: "Transform MedicationRequest to OMOP Drug Exposure"
+          depends_on:
+            - task_key: omop_visit
+          notebook_task:
+            notebook_path: src/redox-fhir-pipeline/gold/04 - Drug Exposure.ipynb
+            base_parameters:
+              catalog_use: "{{job.parameters.catalog_use}}"
+              silver_schema: "{{job.parameters.schema_use}}"
+              gold_schema: "{{job.parameters.gold_schema}}"
+          warehouse_id: ${var.sql_warehouse_id}
+
+        # Task 12: OMOP Procedure Occurrence (from Procedure)
+        - task_key: omop_procedure
+          description: "Transform Procedure to OMOP Procedure Occurrence"
+          depends_on:
+            - task_key: omop_visit
+          notebook_task:
+            notebook_path: src/redox-fhir-pipeline/gold/05 - Procedure Occurrence.ipynb
+            base_parameters:
+              catalog_use: "{{job.parameters.catalog_use}}"
+              silver_schema: "{{job.parameters.schema_use}}"
+              gold_schema: "{{job.parameters.gold_schema}}"
+          warehouse_id: ${var.sql_warehouse_id}
+
+        # Task 13: OMOP Measurement (from Observation - labs/vitals)
+        - task_key: omop_measurement
+          description: "Transform Observation (labs/vitals) to OMOP Measurement"
+          depends_on:
+            - task_key: omop_visit
+          notebook_task:
+            notebook_path: src/redox-fhir-pipeline/gold/06 - Measurement.ipynb
+            base_parameters:
+              catalog_use: "{{job.parameters.catalog_use}}"
+              silver_schema: "{{job.parameters.schema_use}}"
+              gold_schema: "{{job.parameters.gold_schema}}"
+          warehouse_id: ${var.sql_warehouse_id}
+
+        # Task 14: OMOP Observation (from Observation - other)
+        - task_key: omop_observation
+          description: "Transform Observation (other) to OMOP Observation"
+          depends_on:
+            - task_key: omop_visit
+          notebook_task:
+            notebook_path: src/redox-fhir-pipeline/gold/07 - Observation.ipynb
+            base_parameters:
+              catalog_use: "{{job.parameters.catalog_use}}"
+              silver_schema: "{{job.parameters.schema_use}}"
+              gold_schema: "{{job.parameters.gold_schema}}"
+          warehouse_id: ${var.sql_warehouse_id}
