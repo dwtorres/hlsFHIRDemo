@@ -1,0 +1,131 @@
+resources:
+  jobs:
+    synthea_data_generator:
+      # Name pattern expected by Check For Synthea Job Deployment notebook:
+      # {user_name}-synthea-data-generation where user_name = email prefix with dots replaced by underscores
+      name: verbena1_gmail_com#ext#-synthea-data-generation
+      tasks:
+        - task_key: synthea_set_up_check
+          notebook_task:
+            notebook_path: notebooks/00-setup-notebooks/0.0-set-up-check
+            base_parameters:
+              catalog_name: "{{job.parameters.catalog_name}}"
+              schema_name: "{{job.parameters.schema_name}}"
+            source: GIT
+
+        - task_key: result_conditional
+          depends_on:
+            - task_key: synthea_set_up_check
+          condition_task:
+            op: EQUAL_TO
+            left: "{{tasks.synthea_set_up_check.values.result}}"
+            right: "True"
+
+        - task_key: uc_setup
+          depends_on:
+            - task_key: result_conditional
+              outcome: "false"
+          notebook_task:
+            notebook_path: notebooks/00-setup-notebooks/0.1-uc-setup
+            base_parameters:
+              catalog_name: "{{job.parameters.catalog_name}}"
+              schema_name: "{{job.parameters.schema_name}}"
+            source: GIT
+
+        - task_key: install_synthea
+          depends_on:
+            - task_key: uc_setup
+            - task_key: result_conditional
+              outcome: "true"
+          run_if: AT_LEAST_ONE_SUCCESS
+          notebook_task:
+            notebook_path: notebooks/00-setup-notebooks/0.2-install-synthea
+            base_parameters:
+              catalog_name: "{{job.parameters.catalog_name}}"
+              schema_name: "{{job.parameters.schema_name}}"
+            source: GIT
+
+        - task_key: configure_synthea
+          depends_on:
+            - task_key: install_synthea
+          notebook_task:
+            notebook_path: notebooks/00-setup-notebooks/0.3-synthea-configuration
+            base_parameters:
+              catalog_name: "{{job.parameters.catalog_name}}"
+              schema_name: "{{job.parameters.schema_name}}"
+            source: GIT
+
+        - task_key: generate_synthetic_data
+          depends_on:
+            - task_key: configure_synthea
+          notebook_task:
+            notebook_path: notebooks/01-data-generation/1.0-synthea-data-generator
+            base_parameters:
+              catalog_name: "{{job.parameters.catalog_name}}"
+              schema_name: "{{job.parameters.schema_name}}"
+              min_records: "{{job.parameters.min_records}}"
+              max_records: "{{job.parameters.max_records}}"
+            source: GIT
+
+        - task_key: inject_bad_data_conditional
+          depends_on:
+            - task_key: generate_synthetic_data
+          condition_task:
+            op: EQUAL_TO
+            left: "{{job.parameters.inject_bad_data}}"
+            right: "true"
+
+        - task_key: inject_bad_data
+          depends_on:
+            - task_key: inject_bad_data_conditional
+              outcome: "true"
+          notebook_task:
+            notebook_path: notebooks/01-data-generation/2.0-inject-bad-data
+            base_parameters:
+              catalog_name: "{{job.parameters.catalog_name}}"
+              schema_name: "{{job.parameters.schema_name}}"
+            source: GIT
+
+        - task_key: create_landing_zone_conditional
+          depends_on:
+            - task_key: inject_bad_data
+            - task_key: inject_bad_data_conditional
+              outcome: "false"
+          run_if: AT_LEAST_ONE_SUCCESS
+          condition_task:
+            op: EQUAL_TO
+            left: "{{job.parameters.create_landing_zone}}"
+            right: "true"
+
+        - task_key: copy_files_to_landing_zone
+          depends_on:
+            - task_key: create_landing_zone_conditional
+              outcome: "true"
+          notebook_task:
+            notebook_path: notebooks/01-data-generation/3.0-move-synthea-files-to-landing
+            base_parameters:
+              catalog_name: "{{job.parameters.catalog_name}}"
+              schema_name: "{{job.parameters.schema_name}}"
+            source: GIT
+
+      git_source:
+        git_url: https://github.com/matthew-gigl-db/synthea-on-dbx.git
+        git_provider: gitHub
+        git_branch: main
+
+      queue:
+        enabled: true
+
+      parameters:
+        - name: catalog_name
+          default: ${var.catalog_use}
+        - name: schema_name
+          default: ${var.schema_use}
+        - name: min_records
+          default: ${var.workshop_min_records}
+        - name: max_records
+          default: ${var.workshop_max_records}
+        - name: inject_bad_data
+          default: "false"
+        - name: create_landing_zone
+          default: "true"
