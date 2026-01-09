@@ -26,14 +26,16 @@ resources:
       # Job parameters
       parameters:
         - name: catalog_use
-          default: ${var.catalog}
+          default: ${var.catalog_use}
         - name: schema_use
-          default: ${var.schema}
+          default: ${var.schema_use}
         - name: gold_schema
           default: ${var.gold_schema}
         - name: mount_path
           default: ${var.mount_path}
         - name: full_refresh
+          default: "false"
+        - name: skip_ingestion
           default: "false"
 
       # Queue for fair scheduling
@@ -45,31 +47,81 @@ resources:
         on_failure:
           - ${var.notification_email}
 
+      # Job cluster for Python tasks that need dbutils
+      job_clusters:
+        - job_cluster_key: python_cluster
+          new_cluster:
+            spark_version: "15.4.x-scala2.12"
+            node_type_id: "Standard_DS3_v2"
+            num_workers: 0
+            spark_conf:
+              "spark.databricks.cluster.profile": "singleNode"
+              "spark.master": "local[*]"
+            custom_tags:
+              ResourceClass: "SingleNode"
+
       tasks:
-        # Task 1: Conditional full refresh (drop tables)
+        # Condition 1: Check if ingestion should be skipped
+        - task_key: check_skip_ingestion
+          condition_task:
+            op: EQUAL_TO
+            left: "{{job.parameters.skip_ingestion}}"
+            right: "false"
+
+        # Condition 2: Check if full refresh requested
         - task_key: check_full_refresh
-          description: "Check if full refresh is requested"
+          condition_task:
+            op: EQUAL_TO
+            left: "{{job.parameters.full_refresh}}"
+            right: "true"
+
+        # Task 1: Conditional full refresh (drop tables)
+        - task_key: drop_tables
+          description: "Drop tables for full refresh"
+          depends_on:
+            - task_key: check_full_refresh
+              outcome: "true"
+            - task_key: check_skip_ingestion
+              outcome: "true"
+          run_if: ALL_SUCCESS
           notebook_task:
-            notebook_path: src/redox-fhir-pipeline/06 - Drop Tables.ipynb
+            notebook_path: ../src/redox-fhir-pipeline/06 - Drop Tables.ipynb
+            source: WORKSPACE
             base_parameters:
               catalog_use: "{{job.parameters.catalog_use}}"
               schema_use: "{{job.parameters.schema_use}}"
-          run_if: "{{job.parameters.full_refresh}} == 'true'"
-          warehouse_id: ${var.sql_warehouse_id}
+            warehouse_id: ${var.sql_warehouse_id}
 
-        # Task 2: Bronze ingestion (raw JSON + VARIANT)
+        # Task 2a: Bronze ingestion gate - waits for drop if full_refresh
+        - task_key: bronze_ready
+          description: "Gate for bronze ingestion after optional drop"
+          depends_on:
+            - task_key: check_skip_ingestion
+              outcome: "true"
+            - task_key: drop_tables
+            - task_key: check_full_refresh
+              outcome: "false"
+          run_if: AT_LEAST_ONE_SUCCESS
+          condition_task:
+            op: EQUAL_TO
+            left: "true"
+            right: "true"
+
+        # Task 2b: Bronze ingestion (raw JSON + VARIANT)
+        # Runs only when skip_ingestion=false (check returns "true")
         - task_key: bronze_ingestion
           description: "Ingest raw FHIR bundles into Bronze tables"
           depends_on:
-            - task_key: check_full_refresh
-              outcome: ALL_DONE
+            - task_key: bronze_ready
+              outcome: "true"
           notebook_task:
-            notebook_path: src/redox-fhir-pipeline/01 - Bronze Ingestion.ipynb
+            notebook_path: ../src/redox-fhir-pipeline/01 - Bronze Ingestion.ipynb
+            source: WORKSPACE
             base_parameters:
               catalog_use: "{{job.parameters.catalog_use}}"
               schema_use: "{{job.parameters.schema_use}}"
               mount_path: "{{job.parameters.mount_path}}"
-          warehouse_id: ${var.sql_warehouse_id}
+            warehouse_id: ${var.sql_warehouse_id}
 
         # Task 3: Bundle metadata extraction
         - task_key: bundle_meta
@@ -77,11 +129,12 @@ resources:
           depends_on:
             - task_key: bronze_ingestion
           notebook_task:
-            notebook_path: src/redox-fhir-pipeline/02 - Bundle Meta.ipynb
+            notebook_path: ../src/redox-fhir-pipeline/02 - Bundle Meta.ipynb
+            source: WORKSPACE
             base_parameters:
               catalog_use: "{{job.parameters.catalog_use}}"
               schema_use: "{{job.parameters.schema_use}}"
-          warehouse_id: ${var.sql_warehouse_id}
+            warehouse_id: ${var.sql_warehouse_id}
 
         # Task 4: Explode resources and infer schemas
         - task_key: resources_exploded
@@ -89,23 +142,26 @@ resources:
           depends_on:
             - task_key: bronze_ingestion
           notebook_task:
-            notebook_path: src/redox-fhir-pipeline/03 - Resources Exploded.ipynb
+            notebook_path: ../src/redox-fhir-pipeline/03 - Resources Exploded.ipynb
+            source: WORKSPACE
             base_parameters:
               catalog_use: "{{job.parameters.catalog_use}}"
               schema_use: "{{job.parameters.schema_use}}"
-          warehouse_id: ${var.sql_warehouse_id}
+            warehouse_id: ${var.sql_warehouse_id}
 
         # Task 5: Discover resource types (sets task values for for-each)
+        # Uses job cluster for Python/dbutils support
         - task_key: discover_resources
           description: "Discover available FHIR resource types"
           depends_on:
             - task_key: resources_exploded
+          job_cluster_key: python_cluster
           notebook_task:
-            notebook_path: src/redox-fhir-pipeline/05 - Discover Resource Types.ipynb
+            notebook_path: ../src/redox-fhir-pipeline/05 - Discover Resource Types.ipynb
+            source: WORKSPACE
             base_parameters:
               catalog_use: "{{job.parameters.catalog_use}}"
               schema_use: "{{job.parameters.schema_use}}"
-          warehouse_id: ${var.sql_warehouse_id}
 
         # Task 6: Create Silver tables (for-each resource type)
         - task_key: silver_tables
@@ -119,13 +175,14 @@ resources:
             task:
               task_key: silver_resource
               notebook_task:
-                notebook_path: src/redox-fhir-pipeline/04 - Silver Tables.ipynb
+                notebook_path: ../src/redox-fhir-pipeline/04 - Silver Tables.ipynb
+                source: WORKSPACE
                 base_parameters:
                   catalog_use: "{{job.parameters.catalog_use}}"
                   schema_use: "{{job.parameters.schema_use}}"
                   resource_type: "{{input}}"
                   full_refresh: "{{job.parameters.full_refresh}}"
-              warehouse_id: ${var.sql_warehouse_id}
+                warehouse_id: ${var.sql_warehouse_id}
 
         # =====================================================================
         # GOLD LAYER: OMOP CDM v5.4 Tables
@@ -136,26 +193,34 @@ resources:
           description: "Transform Patient to OMOP Person"
           depends_on:
             - task_key: silver_tables
+            - task_key: check_skip_ingestion
+              outcome: "false"
+          run_if: AT_LEAST_ONE_SUCCESS
           notebook_task:
-            notebook_path: src/redox-fhir-pipeline/gold/01 - Person.ipynb
+            notebook_path: ../src/redox-fhir-pipeline/gold/01 - Person.ipynb
+            source: WORKSPACE
             base_parameters:
               catalog_use: "{{job.parameters.catalog_use}}"
               silver_schema: "{{job.parameters.schema_use}}"
               gold_schema: "{{job.parameters.gold_schema}}"
-          warehouse_id: ${var.sql_warehouse_id}
+            warehouse_id: ${var.sql_warehouse_id}
 
         # Task 8: OMOP Care Site (from Organization)
         - task_key: omop_care_site
           description: "Transform Organization to OMOP Care Site"
           depends_on:
             - task_key: silver_tables
+            - task_key: check_skip_ingestion
+              outcome: "false"
+          run_if: AT_LEAST_ONE_SUCCESS
           notebook_task:
-            notebook_path: src/redox-fhir-pipeline/gold/08 - Provider and Care Site.ipynb
+            notebook_path: ../src/redox-fhir-pipeline/gold/08 - Provider and Care Site.ipynb
+            source: WORKSPACE
             base_parameters:
               catalog_use: "{{job.parameters.catalog_use}}"
               silver_schema: "{{job.parameters.schema_use}}"
               gold_schema: "{{job.parameters.gold_schema}}"
-          warehouse_id: ${var.sql_warehouse_id}
+            warehouse_id: ${var.sql_warehouse_id}
 
         # Task 9: OMOP Visit Occurrence (from Encounter)
         - task_key: omop_visit
@@ -163,12 +228,13 @@ resources:
           depends_on:
             - task_key: omop_person
           notebook_task:
-            notebook_path: src/redox-fhir-pipeline/gold/02 - Visit Occurrence.ipynb
+            notebook_path: ../src/redox-fhir-pipeline/gold/02 - Visit Occurrence.ipynb
+            source: WORKSPACE
             base_parameters:
               catalog_use: "{{job.parameters.catalog_use}}"
               silver_schema: "{{job.parameters.schema_use}}"
               gold_schema: "{{job.parameters.gold_schema}}"
-          warehouse_id: ${var.sql_warehouse_id}
+            warehouse_id: ${var.sql_warehouse_id}
 
         # Task 10: OMOP Condition Occurrence (from Condition)
         - task_key: omop_condition
@@ -176,12 +242,13 @@ resources:
           depends_on:
             - task_key: omop_visit
           notebook_task:
-            notebook_path: src/redox-fhir-pipeline/gold/03 - Condition Occurrence.ipynb
+            notebook_path: ../src/redox-fhir-pipeline/gold/03 - Condition Occurrence.ipynb
+            source: WORKSPACE
             base_parameters:
               catalog_use: "{{job.parameters.catalog_use}}"
               silver_schema: "{{job.parameters.schema_use}}"
               gold_schema: "{{job.parameters.gold_schema}}"
-          warehouse_id: ${var.sql_warehouse_id}
+            warehouse_id: ${var.sql_warehouse_id}
 
         # Task 11: OMOP Drug Exposure (from MedicationRequest)
         - task_key: omop_drug
@@ -189,12 +256,13 @@ resources:
           depends_on:
             - task_key: omop_visit
           notebook_task:
-            notebook_path: src/redox-fhir-pipeline/gold/04 - Drug Exposure.ipynb
+            notebook_path: ../src/redox-fhir-pipeline/gold/04 - Drug Exposure.ipynb
+            source: WORKSPACE
             base_parameters:
               catalog_use: "{{job.parameters.catalog_use}}"
               silver_schema: "{{job.parameters.schema_use}}"
               gold_schema: "{{job.parameters.gold_schema}}"
-          warehouse_id: ${var.sql_warehouse_id}
+            warehouse_id: ${var.sql_warehouse_id}
 
         # Task 12: OMOP Procedure Occurrence (from Procedure)
         - task_key: omop_procedure
@@ -202,12 +270,13 @@ resources:
           depends_on:
             - task_key: omop_visit
           notebook_task:
-            notebook_path: src/redox-fhir-pipeline/gold/05 - Procedure Occurrence.ipynb
+            notebook_path: ../src/redox-fhir-pipeline/gold/05 - Procedure Occurrence.ipynb
+            source: WORKSPACE
             base_parameters:
               catalog_use: "{{job.parameters.catalog_use}}"
               silver_schema: "{{job.parameters.schema_use}}"
               gold_schema: "{{job.parameters.gold_schema}}"
-          warehouse_id: ${var.sql_warehouse_id}
+            warehouse_id: ${var.sql_warehouse_id}
 
         # Task 13: OMOP Measurement (from Observation - labs/vitals)
         - task_key: omop_measurement
@@ -215,12 +284,13 @@ resources:
           depends_on:
             - task_key: omop_visit
           notebook_task:
-            notebook_path: src/redox-fhir-pipeline/gold/06 - Measurement.ipynb
+            notebook_path: ../src/redox-fhir-pipeline/gold/06 - Measurement.ipynb
+            source: WORKSPACE
             base_parameters:
               catalog_use: "{{job.parameters.catalog_use}}"
               silver_schema: "{{job.parameters.schema_use}}"
               gold_schema: "{{job.parameters.gold_schema}}"
-          warehouse_id: ${var.sql_warehouse_id}
+            warehouse_id: ${var.sql_warehouse_id}
 
         # Task 14: OMOP Observation (from Observation - other)
         - task_key: omop_observation
@@ -228,9 +298,10 @@ resources:
           depends_on:
             - task_key: omop_visit
           notebook_task:
-            notebook_path: src/redox-fhir-pipeline/gold/07 - Observation.ipynb
+            notebook_path: ../src/redox-fhir-pipeline/gold/07 - Observation.ipynb
+            source: WORKSPACE
             base_parameters:
               catalog_use: "{{job.parameters.catalog_use}}"
               silver_schema: "{{job.parameters.schema_use}}"
               gold_schema: "{{job.parameters.gold_schema}}"
-          warehouse_id: ${var.sql_warehouse_id}
+            warehouse_id: ${var.sql_warehouse_id}

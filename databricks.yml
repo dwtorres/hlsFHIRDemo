@@ -5,13 +5,15 @@ bundle:
   uuid: a5226c0c-1dee-41da-8302-28250c1506f8
 
 include:
-  # - resources/*.yml 
+  # - resources/*.yml
 # Workshop Resources Deployment Instructions
-# 1. Uncomment "lab workspace set up" and "run synthea on dbx" to deploy and run these workflows first. 
-# 2. The catalog, schema, and volume needed to run the third workflow "synthea fhir ingestion" in created in the first two workflows.  Additionally, if using the SQL Warehouse created in the set up workflow then the sql_warehouse_id variable in the "warehouse" target should be updated prior to running the deploy with all three of the below resources uncommented. Please see all Brickster instructions in ~/src/FHIR_Workshop/setup/Brickster README.md for more information.  
+# 1. Uncomment "lab workspace set up" and "run synthea on dbx" to deploy and run these workflows first.
+# 2. The catalog, schema, and volume needed to run the third workflow "synthea fhir ingestion" in created in the first two workflows.  Additionally, if using the SQL Warehouse created in the set up workflow then the sql_warehouse_id variable in the "warehouse" target should be updated prior to running the deploy with all three of the below resources uncommented. Please see all Brickster instructions in ~/src/FHIR_Workshop/setup/Brickster README.md for more information.
   - resources/workshop_lab_workspace_setup.job.yml
   - resources/workshop_run_synthea_on_dbx.job.yml
   - resources/workshop_synthea_fhir_ingestion.job.yml
+  - resources/synthea_data_generator.job.yml
+  - resources/redox_fhir_pipeline.job.yml
 # If deploying outside of a "Workshop Workspace" such as one of the Field Eng environments, please use the "dev" target, otherwise deploy to the "workshop" target.  Please do not deploy to other targets in Field Eng workspaces without express permission from Matthew Giglia. 
 
 # Special Deployment Workflows outside of the FHIR Workshop - should remain commented for most Databricks employees.  Do not use without EXPRESS PERMISSION.  
@@ -61,6 +63,38 @@ targets:
         # use 148ccb90800933a1 for https://adb-984752964297111.11.azuredatabricks.net
       sql_warehouse_id: 4b9b953939869799
 
+  dwtorres:
+    mode: development
+    presets:
+      pipelines_development: true
+      trigger_pause_status: PAUSED
+      jobs_max_concurrent_runs: 1
+      tags:
+        fhir_workshop: true
+        dev: dwtorres
+        removeAfter: 20261231
+    workspace:
+      host: https://adb-254708779127617.17.azuredatabricks.net
+      root_path: /Workspace/Users/${var.run_as_user}/.bundle/${bundle.name}/${bundle.target}
+    permissions:
+      - user_name: ${var.run_as_user}
+        level: CAN_MANAGE
+    run_as:
+      user_name: ${var.run_as_user}
+    variables:
+      customer_name: dwtorres
+      catalog_use: fhir_workshop
+      schema_use: synthea
+      gold_schema: synthea_omop
+      mount_path: /Volumes/fhir_workshop/synthea/synthetic_files_raw/output/fhir/
+      notification_email: verbena1_gmail.com#ext#@verbena1gmail.onmicrosoft.com
+      workshop_fhir_ingestion_workflow_name: Synthea FHIR Ingestion
+      workflow_trigger_pause_status: PAUSED
+      run_as_user: verbena1_gmail.com#ext#@verbena1gmail.onmicrosoft.com
+      sql_warehouse_id: 61df6c4c88d9ce72
+      workshop_min_records: 100
+      workshop_max_records: 500
+
   workshop:
     mode: production
     presets:
@@ -70,7 +104,7 @@ targets:
         removeAfter: 20261231
     workspace:
       # edit the workshop url for the given Cloud Labs deployment
-      host: https://dbc-857ff670-4c00.cloud.databricks.com/ 
+      host: https://dbc-857ff670-4c00.cloud.databricks.com/
       # We explicitly specify the root_path to make sure we only have a single copy.
       root_path: /Workspace/Users/${var.run_as_user}/.bundle/${bundle.name}/${bundle.target}
     permissions:
@@ -208,6 +242,15 @@ variables:
   workshop_max_records:
     default: 1600
     description: The maximum number of records for the workshop that Synthea should generate
+  gold_schema:
+    default: synthea_omop
+    description: The schema name for OMOP CDM Gold layer tables
+  mount_path:
+    default: /Volumes/fhir_workshop/synthea/synthetic_files_raw/output/fhir/
+    description: The volume path for FHIR bundle file ingestion
+  notification_email:
+    default: matthew.giglia@databricks.com
+    description: Email address for job failure notifications
   # brickster_dev_target_schema_name:
   #   default: synthea
   #   description: The name of the schema that will be created for practice in Field End workspaces.  
