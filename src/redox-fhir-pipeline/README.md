@@ -32,24 +32,42 @@ A production-ready pipeline for ingesting FHIR bundles from Redox into Databrick
 │  │ (FK→BM)  │ │ (FK→BM)   │ │ (FK→BM)      │ │ (FK→BM)  │ │ (FK→BM)     │  │
 │  └──────────┘ └───────────┘ └──────────────┘ └──────────┘ └─────────────┘  │
 └─────────────────────────────────────────────────────────────────────────────┘
-                                │
-                                ▼ OMOP Transformations
+ ```
+
+### Standalone OMOP Gold Layer
+
+The OMOP Gold layer operates **independently** from the FHIR ingestion pipeline, using Delta Streaming to automatically detect and process new records from Silver tables.
+
+```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│  GOLD LAYER (OMOP CDM v5.4)                                                 │
+│  FHIR SILVER TABLES (Source)                                                │
+│  Patient | Encounter | Condition | Procedure | Observation | ...            │
+└────────────────────────────────┬────────────────────────────────────────────┘
+                                 │
+                                 │ Delta Streaming (Automatic CDC)
+                                 │ No direct pipeline dependency
+                                 ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  OMOP GOLD PIPELINE (Standalone)                                            │
 │  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │  Clinical Data Tables                                                │   │
-│  │  • person                 ← Patient                                  │   │
-│  │  • visit_occurrence       ← Encounter                                │   │
-│  │  • condition_occurrence   ← Condition                                │   │
-│  │  • drug_exposure          ← MedicationRequest                        │   │
-│  │  • procedure_occurrence   ← Procedure                                │   │
-│  │  • measurement            ← Observation (lab/vitals)                 │   │
-│  │  • observation            ← Observation (other)                      │   │
+│  │  Foundation Tables (Phase 1 - Parallel)                              │   │
+│  │  • person           ← Patient                                        │   │
+│  │  • care_site        ← Organization                                   │   │
+│  │  • provider         ← Practitioner                                   │   │
 │  └─────────────────────────────────────────────────────────────────────┘   │
+│                                    ↓                                        │
 │  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │  Health System Tables                                                │   │
-│  │  • provider               ← Practitioner                             │   │
-│  │  • care_site              ← Organization                             │   │
+│  │  Visit Table (Phase 2)                                               │   │
+│  │  • visit_occurrence ← Encounter                                      │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                    ↓                                        │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  Clinical Tables (Phase 3 - Parallel)                                │   │
+│  │  • condition_occurrence  ← Condition                                 │   │
+│  │  • drug_exposure         ← MedicationRequest                         │   │
+│  │  • procedure_occurrence  ← Procedure                                 │   │
+│  │  • measurement           ← Observation (labs/vitals)                 │   │
+│  │  • observation           ← Observation (other)                       │   │
 │  └─────────────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -67,10 +85,10 @@ A production-ready pipeline for ingesting FHIR bundles from Redox into Databrick
 | `05 - Discover Resource Types.ipynb` | Set task values for workflow |
 | `06 - Drop Tables.ipynb` | Utility for full refresh |
 
-### Gold Layer (OMOP CDM v5.4)
+### Gold Layer (OMOP CDM v5.4) - Standalone
 | Notebook | Purpose |
 |----------|---------|
-| `gold/00 - OMOP Gold Overview.ipynb` | OMOP architecture and configuration |
+| `gold/00 - OMOP Gold Overview.ipynb` | Standalone architecture and configuration |
 | `gold/01 - Person.ipynb` | Patient → OMOP Person |
 | `gold/02 - Visit Occurrence.ipynb` | Encounter → OMOP Visit_Occurrence |
 | `gold/03 - Condition Occurrence.ipynb` | Condition → OMOP Condition_Occurrence |
@@ -79,6 +97,7 @@ A production-ready pipeline for ingesting FHIR bundles from Redox into Databrick
 | `gold/06 - Measurement.ipynb` | Observation (labs/vitals) → OMOP Measurement |
 | `gold/07 - Observation.ipynb` | Observation (other) → OMOP Observation |
 | `gold/08 - Provider and Care Site.ipynb` | Practitioner/Organization → Provider/Care_Site |
+| `gold/09 - Run All OMOP Tables.ipynb` | Orchestration: Run all OMOP tables in sequence |
 
 ## Quick Start
 
@@ -109,11 +128,36 @@ CREATE SCHEMA IF NOT EXISTS your_catalog.your_schema;
 
 ### 4. Deploy as Workflow
 
-Use the job configuration in `resources/redox_fhir_pipeline.job.yml`:
-
+**FHIR Ingestion Pipeline** (Bronze/Silver):
 ```bash
+# Deploy FHIR ingestion job
 databricks bundle deploy -t your_target
 ```
+Uses job configuration: `resources/redox_fhir_pipeline.job.yml`
+
+**Standalone OMOP Pipeline** (Gold):
+```bash
+# Deploy standalone OMOP job (runs independently)
+databricks bundle deploy -t your_target
+```
+Uses job configuration: `resources/omop_gold_pipeline.job.yml`
+
+### 5. OMOP Deployment Options
+
+The OMOP Gold layer is **decoupled** from FHIR ingestion and can be deployed independently:
+
+| Option | Job | Trigger | Use Case |
+|--------|-----|---------|----------|
+| Scheduled | `omop_gold_pipeline` | Every 10 min | Near-realtime analytics |
+| Manual | Run notebooks directly | On-demand | Testing, ad-hoc refresh |
+| Continuous | Modify job trigger | Continuous | True realtime (higher cost) |
+
+**Key Benefits of Standalone Design:**
+1. **Decoupled Execution**: OMOP pipeline runs on its own schedule
+2. **Automatic CDC**: Streaming tables detect new Silver records automatically
+3. **Fault Tolerance**: FHIR pipeline failures don't block OMOP processing
+4. **Independent Scaling**: Adjust OMOP refresh frequency separately
+5. **Easier Testing**: Test OMOP transformations without FHIR ingestion
 
 ## Key Features
 

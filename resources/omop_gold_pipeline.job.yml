@@ -1,0 +1,161 @@
+# Standalone OMOP CDM Gold Layer Pipeline
+#
+# This workflow transforms FHIR Silver tables into OMOP CDM v5.4 tables.
+# It runs independently of the FHIR ingestion pipeline using streaming tables
+# that automatically detect and process new records from Silver tables.
+#
+# Architecture:
+#   Silver Tables (Patient, Encounter, Condition, ...)
+#         ↓ (Streaming - automatic CDC)
+#   Gold Tables (person, visit_occurrence, condition_occurrence, ...)
+#
+# Trigger: Scheduled (every 10 minutes) - streaming tables handle incremental processing
+
+resources:
+  jobs:
+    omop_gold_pipeline:
+      name: "OMOP CDM Gold Layer Pipeline"
+      description: "Realtime OMOP CDM v5.4 from FHIR Silver tables - Standalone"
+
+      # Scheduled trigger - runs every 10 minutes
+      # Streaming tables automatically handle incremental processing
+      trigger:
+        pause_status: PAUSED  # Set to UNPAUSED in production
+        periodic:
+          interval: 10
+          unit: MINUTES
+
+      # Allow concurrent runs for continuous processing
+      max_concurrent_runs: 1
+
+      # Job parameters
+      parameters:
+        - name: catalog_use
+          default: ${var.catalog}
+        - name: silver_schema
+          default: ${var.silver_schema}
+        - name: gold_schema
+          default: ${var.gold_schema}
+
+      # Queue for fair scheduling
+      queue:
+        enabled: true
+
+      # Email notifications on failure
+      email_notifications:
+        on_failure:
+          - ${var.notification_email}
+
+      tasks:
+        # =====================================================================
+        # FOUNDATION TABLES (No dependencies on other OMOP tables)
+        # These run in parallel as they only depend on Silver tables
+        # =====================================================================
+
+        # Task 1: OMOP Person (from Silver.Patient)
+        - task_key: omop_person
+          description: "Stream Patient → OMOP Person"
+          notebook_task:
+            notebook_path: src/redox-fhir-pipeline/gold/01 - Person.ipynb
+            base_parameters:
+              catalog_use: "{{job.parameters.catalog_use}}"
+              silver_schema: "{{job.parameters.silver_schema}}"
+              gold_schema: "{{job.parameters.gold_schema}}"
+          warehouse_id: ${var.sql_warehouse_id}
+
+        # Task 2: OMOP Care Site (from Silver.Organization)
+        - task_key: omop_care_site
+          description: "Stream Organization → OMOP Care Site + Provider"
+          notebook_task:
+            notebook_path: src/redox-fhir-pipeline/gold/08 - Provider and Care Site.ipynb
+            base_parameters:
+              catalog_use: "{{job.parameters.catalog_use}}"
+              silver_schema: "{{job.parameters.silver_schema}}"
+              gold_schema: "{{job.parameters.gold_schema}}"
+          warehouse_id: ${var.sql_warehouse_id}
+
+        # =====================================================================
+        # VISIT TABLE (Depends on Person for FK)
+        # =====================================================================
+
+        # Task 3: OMOP Visit Occurrence (from Silver.Encounter)
+        - task_key: omop_visit
+          description: "Stream Encounter → OMOP Visit Occurrence"
+          depends_on:
+            - task_key: omop_person
+          notebook_task:
+            notebook_path: src/redox-fhir-pipeline/gold/02 - Visit Occurrence.ipynb
+            base_parameters:
+              catalog_use: "{{job.parameters.catalog_use}}"
+              silver_schema: "{{job.parameters.silver_schema}}"
+              gold_schema: "{{job.parameters.gold_schema}}"
+          warehouse_id: ${var.sql_warehouse_id}
+
+        # =====================================================================
+        # CLINICAL TABLES (Depend on Visit for FK - run in parallel)
+        # =====================================================================
+
+        # Task 4: OMOP Condition Occurrence (from Silver.Condition)
+        - task_key: omop_condition
+          description: "Stream Condition → OMOP Condition Occurrence"
+          depends_on:
+            - task_key: omop_visit
+          notebook_task:
+            notebook_path: src/redox-fhir-pipeline/gold/03 - Condition Occurrence.ipynb
+            base_parameters:
+              catalog_use: "{{job.parameters.catalog_use}}"
+              silver_schema: "{{job.parameters.silver_schema}}"
+              gold_schema: "{{job.parameters.gold_schema}}"
+          warehouse_id: ${var.sql_warehouse_id}
+
+        # Task 5: OMOP Drug Exposure (from Silver.MedicationRequest)
+        - task_key: omop_drug
+          description: "Stream MedicationRequest → OMOP Drug Exposure"
+          depends_on:
+            - task_key: omop_visit
+          notebook_task:
+            notebook_path: src/redox-fhir-pipeline/gold/04 - Drug Exposure.ipynb
+            base_parameters:
+              catalog_use: "{{job.parameters.catalog_use}}"
+              silver_schema: "{{job.parameters.silver_schema}}"
+              gold_schema: "{{job.parameters.gold_schema}}"
+          warehouse_id: ${var.sql_warehouse_id}
+
+        # Task 6: OMOP Procedure Occurrence (from Silver.Procedure)
+        - task_key: omop_procedure
+          description: "Stream Procedure → OMOP Procedure Occurrence"
+          depends_on:
+            - task_key: omop_visit
+          notebook_task:
+            notebook_path: src/redox-fhir-pipeline/gold/05 - Procedure Occurrence.ipynb
+            base_parameters:
+              catalog_use: "{{job.parameters.catalog_use}}"
+              silver_schema: "{{job.parameters.silver_schema}}"
+              gold_schema: "{{job.parameters.gold_schema}}"
+          warehouse_id: ${var.sql_warehouse_id}
+
+        # Task 7: OMOP Measurement (from Silver.Observation - labs/vitals)
+        - task_key: omop_measurement
+          description: "Stream Observation (labs/vitals) → OMOP Measurement"
+          depends_on:
+            - task_key: omop_visit
+          notebook_task:
+            notebook_path: src/redox-fhir-pipeline/gold/06 - Measurement.ipynb
+            base_parameters:
+              catalog_use: "{{job.parameters.catalog_use}}"
+              silver_schema: "{{job.parameters.silver_schema}}"
+              gold_schema: "{{job.parameters.gold_schema}}"
+          warehouse_id: ${var.sql_warehouse_id}
+
+        # Task 8: OMOP Observation (from Silver.Observation - other)
+        - task_key: omop_observation
+          description: "Stream Observation (other) → OMOP Observation"
+          depends_on:
+            - task_key: omop_visit
+          notebook_task:
+            notebook_path: src/redox-fhir-pipeline/gold/07 - Observation.ipynb
+            base_parameters:
+              catalog_use: "{{job.parameters.catalog_use}}"
+              silver_schema: "{{job.parameters.silver_schema}}"
+              gold_schema: "{{job.parameters.gold_schema}}"
+          warehouse_id: ${var.sql_warehouse_id}
