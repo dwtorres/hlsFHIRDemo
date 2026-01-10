@@ -85,7 +85,7 @@ The OMOP Gold layer operates **independently** from the FHIR ingestion pipeline,
 | `05 - Discover Resource Types.ipynb` | Set task values for workflow |
 | `06 - Drop Tables.ipynb` | Utility for full refresh |
 
-### Gold Layer (OMOP CDM v5.4) - Standalone
+### Gold Layer (OMOP CDM v5.4) - Standalone with Pediatric Focus
 | Notebook | Purpose |
 |----------|---------|
 | `gold/00 - OMOP Gold Overview.ipynb` | Standalone architecture and configuration |
@@ -98,6 +98,15 @@ The OMOP Gold layer operates **independently** from the FHIR ingestion pipeline,
 | `gold/07 - Observation.ipynb` | Observation (other) → OMOP Observation |
 | `gold/08 - Provider and Care Site.ipynb` | Practitioner/Organization → Provider/Care_Site |
 | `gold/09 - Run All OMOP Tables.ipynb` | Orchestration: Run all OMOP tables in sequence |
+| `gold/10 - Vocabulary Setup.ipynb` | OMOP vocabularies with pediatric concepts |
+| `gold/11 - Metadata Tables.ipynb` | CDM_SOURCE, Location, Observation Period, Death |
+
+#### Pediatric-Specific Features
+- **Growth Charts**: WHO/CDC percentiles (height-for-age, weight-for-age, BMI-for-age)
+- **Developmental Assessments**: Denver II, ASQ-3, M-CHAT-R, PedsQL
+- **Neonatal Measurements**: APGAR scores, gestational age, birth weight/length
+- **Immunization Tracking**: CDC pediatric vaccine schedule (CVX codes)
+- **Common Pediatric Conditions**: Otitis media, asthma, bronchiolitis, developmental delay
 
 ## Quick Start
 

@@ -1,6 +1,8 @@
-# Standalone OMOP CDM Gold Layer Pipeline
+# Standalone OMOP CDM Gold Layer Pipeline (Pediatric Focus)
 #
-# This workflow transforms FHIR Silver tables into OMOP CDM v5.4 tables.
+# This workflow transforms FHIR Silver tables into OMOP CDM v5.4 tables
+# with PEDSnet pediatric extensions.
+#
 # It runs independently of the FHIR ingestion pipeline using streaming tables
 # that automatically detect and process new records from Silver tables.
 #
@@ -8,6 +10,12 @@
 #   Silver Tables (Patient, Encounter, Condition, ...)
 #         ↓ (Streaming - automatic CDC)
 #   Gold Tables (person, visit_occurrence, condition_occurrence, ...)
+#
+# Pediatric Features:
+#   - Growth chart percentiles (WHO/CDC)
+#   - Developmental assessments
+#   - Immunization tracking
+#   - Neonatal measurements (APGAR, gestational age)
 #
 # Trigger: Scheduled (every 10 minutes) - streaming tables handle incremental processing
 
@@ -47,6 +55,33 @@ resources:
           - ${var.notification_email}
 
       tasks:
+        # =====================================================================
+        # VOCABULARY & METADATA (Run first - no dependencies)
+        # =====================================================================
+
+        # Task 0a: Setup Vocabulary Tables (with pediatric concepts)
+        - task_key: vocabulary_setup
+          description: "Setup OMOP vocabulary tables with pediatric concepts"
+          notebook_task:
+            notebook_path: src/redox-fhir-pipeline/gold/10 - Vocabulary Setup.ipynb
+            base_parameters:
+              catalog_use: "{{job.parameters.catalog_use}}"
+              gold_schema: "{{job.parameters.gold_schema}}"
+          warehouse_id: ${var.sql_warehouse_id}
+
+        # Task 0b: Setup Metadata Tables
+        - task_key: metadata_setup
+          description: "Setup CDM_SOURCE, Location, Observation Period"
+          depends_on:
+            - task_key: vocabulary_setup
+          notebook_task:
+            notebook_path: src/redox-fhir-pipeline/gold/11 - Metadata Tables.ipynb
+            base_parameters:
+              catalog_use: "{{job.parameters.catalog_use}}"
+              silver_schema: "{{job.parameters.silver_schema}}"
+              gold_schema: "{{job.parameters.gold_schema}}"
+          warehouse_id: ${var.sql_warehouse_id}
+
         # =====================================================================
         # FOUNDATION TABLES (No dependencies on other OMOP tables)
         # These run in parallel as they only depend on Silver tables
